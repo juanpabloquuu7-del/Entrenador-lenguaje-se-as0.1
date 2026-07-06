@@ -43,11 +43,12 @@ class AppWindow:
         self.classifier = Classifier()
         self.tts        = TTSEngine()
 
-        self.pizarra        = ""
-        self._ultima_letra  = None
-        self._t_ultima_add  = 0.0
-        self._t_sin_mano    = None   # timestamp desde que no hay mano
-        self._espacio_puesto = False  # evita poner múltiples espacios seguidos
+        self.pizarra         = ""
+        self._ultima_letra   = None
+        self._t_ultima_add   = 0.0
+        self._t_sin_mano     = None
+        self._espacio_puesto = False
+        self._ultima_palabra_leida = ""  # evita leer la misma palabra dos veces
 
         self._build_ui()
         self._verificar_modelo()
@@ -83,9 +84,15 @@ class AppWindow:
         self.lbl_confianza.pack(side="left", padx=(12, 0))
 
         # ── Pizarra ──────────────────────────────────────────────────────────
+        # ── Indicador de estado de voz ───────────────────────────────────
+        self.lbl_voz = tk.Label(
+            self.root, text="🎤 Esperando seña...",
+            bg=COLOR_BG, fg="#585b70", font=("Segoe UI", 10, "bold"))
+        self.lbl_voz.grid(row=2, column=0, columnspan=2, sticky="w", padx=16)
+
         tk.Label(self.root, text="PIZARRA", bg=COLOR_BG, fg=COLOR_ACENTO,
                  font=("Segoe UI", 10, "bold")).grid(
-            row=2, column=0, columnspan=4, sticky="w", padx=16)
+            row=2, column=2, columnspan=2, sticky="e", padx=16)
 
         self.lbl_pizarra = tk.Label(
             self.root, text="", bg=COLOR_PIZARRA_BG, fg=COLOR_OK,
@@ -218,6 +225,7 @@ class AppWindow:
     def _manejar_espacio_automatico(self, mano_presente):
         if mano_presente:
             self._t_sin_mano = None
+            self.lbl_voz.configure(text="🖐 Señando...", fg=COLOR_OK)
             return
 
         ahora = time.time()
@@ -225,7 +233,26 @@ class AppWindow:
             self._t_sin_mano = ahora
             return
 
-        if (ahora - self._t_sin_mano) >= ESPACIO_SEG and not self._espacio_puesto:
+        espera = ahora - self._t_sin_mano
+
+        # Cuenta regresiva visual para el profesor
+        if espera < ESPACIO_SEG:
+            restante = ESPACIO_SEG - espera
+            self.lbl_voz.configure(
+                text=f"⏳ Leyendo en {restante:.1f}s...", fg=COLOR_WARN)
+            return
+
+        if not self._espacio_puesto:
+            # Leer la última palabra automáticamente
+            palabras = self.pizarra.strip().split()
+            if palabras:
+                ultima = palabras[-1]
+                if ultima != self._ultima_palabra_leida:
+                    self._ultima_palabra_leida = ultima
+                    self.tts.speak_phrase(ultima)
+                    self.lbl_voz.configure(
+                        text=f"🔊 Leyendo: {ultima}", fg=COLOR_ACENTO)
+
             if self.pizarra and not self.pizarra.endswith(" "):
                 self.pizarra += " "
                 self._espacio_puesto = True
@@ -244,7 +271,7 @@ class AppWindow:
         self._ultima_letra = letra
         self._t_ultima_add = ahora
         self._actualizar_pizarra()
-        self.tts.speak_letter(letra)
+        # No leer letra por letra — el profesor escucha la palabra completa al pausar
 
     # ──────────────────────────────────────────────────────── Pizarra ──────
 
