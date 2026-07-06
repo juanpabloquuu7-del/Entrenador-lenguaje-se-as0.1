@@ -1,35 +1,35 @@
 """
 app.py
-Ventana principal del Traductor LSC.
-Feed de cámara en tiempo real + pizarra acumulativa + TTS.
+Traductor LSC para aulas — interfaz principal.
+Estudiante hace señas → letras forman palabras → voz las lee para el profesor.
 """
 
 import tkinter as tk
-from tkinter import messagebox
-import cv2
-import os
-import sys
-import time
+from tkinter import messagebox, scrolledtext
+import cv2, os, sys, time
 from PIL import Image, ImageTk
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE_DIR)
 
 from core.hand_detector import HandDetector
-from core.classifier import Classifier, MODEL_NOT_FOUND
-from core.tts_engine import TTSEngine
+from core.classifier   import Classifier, MODEL_NOT_FOUND
+from core.tts_engine   import TTSEngine
 
-# ---------------------------------------------------------------- Constantes
-CAM_W, CAM_H     = 640, 480
-COOLDOWN_SEG     = 1.5   # segundos entre adiciones de la misma letra
-ESPACIO_SEG      = 2.0   # segundos sin mano para insertar espacio
-COLOR_BG         = "#1e1e2e"
-COLOR_FG         = "#cdd6f4"
-COLOR_ACENTO     = "#89b4fa"
-COLOR_OK         = "#a6e3a1"
-COLOR_WARN       = "#f9e2af"
-COLOR_PIZARRA_BG = "#181825"
-CAMERA_INDICES   = (0, 1, 2, 3)
+# ── Constantes ────────────────────────────────────────────────────────────────
+CAM_W, CAM_H   = 640, 480
+COOLDOWN_SEG   = 1.5
+PAUSA_PALABRA  = 2.0   # segundos sin mano → leer palabra y agregar espacio
+PAUSA_FRASE    = 5.0   # segundos sin mano → leer frase completa
+
+COLOR_BG       = "#1e1e2e"
+COLOR_FG       = "#cdd6f4"
+COLOR_ACENTO   = "#89b4fa"
+COLOR_OK       = "#a6e3a1"
+COLOR_WARN     = "#f9e2af"
+COLOR_PIZARRA  = "#181825"
+COLOR_HISTORIAL= "#11111b"
+CAMERA_INDICES = (0, 1, 2, 3)
 
 
 class AppWindow:
@@ -43,105 +43,137 @@ class AppWindow:
         self.classifier = Classifier()
         self.tts        = TTSEngine()
 
-        self.pizarra         = ""
-        self._ultima_letra   = None
-        self._t_ultima_add   = 0.0
-        self._t_sin_mano     = None
-        self._espacio_puesto = False
-        self._ultima_palabra_leida = ""  # evita leer la misma palabra dos veces
+        # Estado de la pizarra
+        self.palabra_actual      = ""   # letras acumuladas de la palabra en curso
+        self.frase_actual        = ""   # palabras acumuladas de la frase en curso
+        self.historial           = []   # frases completas ya leídas
+
+        # Control de tiempo
+        self._ultima_letra       = None
+        self._t_ultima_add       = 0.0
+        self._t_sin_mano         = None
+        self._palabra_leida      = False  # evita leer la misma palabra dos veces
+        self._frase_leida        = False
 
         self._build_ui()
         self._verificar_modelo()
         self._abrir_camara()
         self._loop_camara()
 
-    # ------------------------------------------------------------------- UI --
+    # ── UI ────────────────────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # ── Feed de cámara ──────────────────────────────────────────────────
+        # ── Cámara ──────────────────────────────────────────────────────────
         self.lbl_camara = tk.Label(self.root, bg="#000000")
         self.lbl_camara.grid(row=0, column=0, columnspan=4,
                              padx=10, pady=(10, 4))
-        self.lbl_camara.configure(
-            text="Iniciando cámara...",
-            fg=COLOR_FG, font=("Segoe UI", 14, "bold"), compound="center")
+        self.lbl_camara.configure(text="Iniciando cámara...",
+                                  fg=COLOR_FG, font=("Segoe UI", 14, "bold"),
+                                  compound="center")
 
-        # ── Letra detectada ─────────────────────────────────────────────────
+        # ── Letra detectada ──────────────────────────────────────────────────
         frame_letra = tk.Frame(self.root, bg=COLOR_BG)
-        frame_letra.grid(row=1, column=0, columnspan=4, pady=4)
+        frame_letra.grid(row=1, column=0, columnspan=4, pady=(4, 0))
 
-        tk.Label(frame_letra, text="Letra detectada:", bg=COLOR_BG,
-                 fg=COLOR_FG, font=("Segoe UI", 12)).pack(side="left", padx=(0, 8))
+        tk.Label(frame_letra, text="Detectando:",
+                 bg=COLOR_BG, fg=COLOR_FG,
+                 font=("Segoe UI", 11)).pack(side="left", padx=(0, 8))
 
         self.lbl_letra = tk.Label(frame_letra, text="—",
                                   bg=COLOR_BG, fg=COLOR_ACENTO,
-                                  font=("Segoe UI", 72, "bold"), width=2)
+                                  font=("Segoe UI", 64, "bold"), width=2)
         self.lbl_letra.pack(side="left")
 
         self.lbl_confianza = tk.Label(frame_letra, text="",
                                       bg=COLOR_BG, fg=COLOR_FG,
-                                      font=("Segoe UI", 12))
-        self.lbl_confianza.pack(side="left", padx=(12, 0))
+                                      font=("Segoe UI", 11))
+        self.lbl_confianza.pack(side="left", padx=(10, 0))
 
-        # ── Pizarra ──────────────────────────────────────────────────────────
-        # ── Indicador de estado de voz ───────────────────────────────────
-        self.lbl_voz = tk.Label(
-            self.root, text="🎤 Esperando seña...",
-            bg=COLOR_BG, fg="#585b70", font=("Segoe UI", 10, "bold"))
-        self.lbl_voz.grid(row=2, column=0, columnspan=2, sticky="w", padx=16)
+        self.lbl_voz = tk.Label(frame_letra, text="🎤 Esperando...",
+                                bg=COLOR_BG, fg="#585b70",
+                                font=("Segoe UI", 10, "bold"))
+        self.lbl_voz.pack(side="right", padx=(0, 10))
 
-        tk.Label(self.root, text="PIZARRA", bg=COLOR_BG, fg=COLOR_ACENTO,
-                 font=("Segoe UI", 10, "bold")).grid(
-            row=2, column=2, columnspan=2, sticky="e", padx=16)
+        # ── Palabra en curso ─────────────────────────────────────────────────
+        frame_palabra = tk.Frame(self.root, bg=COLOR_BG)
+        frame_palabra.grid(row=2, column=0, columnspan=4,
+                           padx=10, pady=(4, 0), sticky="ew")
 
-        self.lbl_pizarra = tk.Label(
-            self.root, text="", bg=COLOR_PIZARRA_BG, fg=COLOR_OK,
-            font=("Segoe UI", 28, "bold"), anchor="w",
-            width=28, height=2, wraplength=580, justify="left",
-            relief="flat", padx=12, pady=8)
-        self.lbl_pizarra.grid(row=3, column=0, columnspan=4,
-                               padx=10, pady=(0, 6), sticky="ew")
+        tk.Label(frame_palabra, text="PALABRA:",
+                 bg=COLOR_BG, fg=COLOR_ACENTO,
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(6, 6))
+
+        self.lbl_palabra = tk.Label(frame_palabra, text="",
+                                    bg=COLOR_PIZARRA, fg="#cba6f7",
+                                    font=("Segoe UI", 22, "bold"),
+                                    anchor="w", padx=10, pady=4,
+                                    width=30)
+        self.lbl_palabra.pack(side="left", fill="x", expand=True)
+
+        # ── Frase en curso ───────────────────────────────────────────────────
+        frame_frase = tk.Frame(self.root, bg=COLOR_BG)
+        frame_frase.grid(row=3, column=0, columnspan=4,
+                         padx=10, pady=(4, 0), sticky="ew")
+
+        tk.Label(frame_frase, text="FRASE:  ",
+                 bg=COLOR_BG, fg=COLOR_ACENTO,
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(6, 6))
+
+        self.lbl_frase = tk.Label(frame_frase, text="",
+                                  bg=COLOR_PIZARRA, fg=COLOR_OK,
+                                  font=("Segoe UI", 20, "bold"),
+                                  anchor="w", padx=10, pady=4,
+                                  width=30, wraplength=560)
+        self.lbl_frase.pack(side="left", fill="x", expand=True)
+
+        # ── Historial ────────────────────────────────────────────────────────
+        tk.Label(self.root, text="HISTORIAL DE LA SESIÓN",
+                 bg=COLOR_BG, fg="#585b70",
+                 font=("Segoe UI", 8, "bold")).grid(
+            row=4, column=0, columnspan=4, sticky="w", padx=16, pady=(8, 0))
+
+        self.txt_historial = scrolledtext.ScrolledText(
+            self.root, height=4, bg=COLOR_HISTORIAL, fg=COLOR_FG,
+            font=("Segoe UI", 11), state="disabled",
+            relief="flat", padx=8, pady=6, wrap="word")
+        self.txt_historial.grid(row=5, column=0, columnspan=4,
+                                padx=10, pady=(0, 6), sticky="ew")
 
         # ── Botones ──────────────────────────────────────────────────────────
-        btn_cfg = {"font": ("Segoe UI", 11, "bold"), "cursor": "hand2",
-                   "padx": 10, "pady": 6, "relief": "flat", "bd": 0}
+        btn_cfg = {"font": ("Segoe UI", 10, "bold"), "cursor": "hand2",
+                   "padx": 8, "pady": 5, "relief": "flat", "bd": 0}
 
-        self.btn_leer = tk.Button(
-            self.root, text="🔊  Leer Frase",
-            bg=COLOR_ACENTO, fg=COLOR_BG, activebackground="#74c7ec",
-            command=self._leer_frase, **btn_cfg)
-        self.btn_leer.grid(row=4, column=0, padx=(10, 4), pady=4, sticky="ew")
+        tk.Button(self.root, text="🔊 Leer Frase",
+                  bg=COLOR_ACENTO, fg=COLOR_BG,
+                  command=self._leer_frase_manual, **btn_cfg).grid(
+            row=6, column=0, padx=(10, 4), pady=4, sticky="ew")
 
-        self.btn_borrar = tk.Button(
-            self.root, text="⌫  Borrar",
-            bg="#fab387", fg=COLOR_BG, activebackground="#f38ba8",
-            command=self._borrar_ultimo, **btn_cfg)
-        self.btn_borrar.grid(row=4, column=1, padx=4, pady=4, sticky="ew")
+        tk.Button(self.root, text="⌫ Borrar Letra",
+                  bg="#fab387", fg=COLOR_BG,
+                  command=self._borrar_letra, **btn_cfg).grid(
+            row=6, column=1, padx=4, pady=4, sticky="ew")
 
-        self.btn_limpiar = tk.Button(
-            self.root, text="🗑  Limpiar",
-            bg="#f38ba8", fg=COLOR_BG, activebackground="#eba0ac",
-            command=self._limpiar_pizarra, **btn_cfg)
-        self.btn_limpiar.grid(row=4, column=2, padx=4, pady=4, sticky="ew")
+        tk.Button(self.root, text="🗑 Limpiar Todo",
+                  bg="#f38ba8", fg=COLOR_BG,
+                  command=self._limpiar_todo, **btn_cfg).grid(
+            row=6, column=2, padx=4, pady=4, sticky="ew")
 
-        self.btn_entrenador = tk.Button(
-            self.root, text="⚙  Modo Entrenador",
-            bg="#585b70", fg=COLOR_FG, activebackground="#6c7086",
-            command=self._abrir_entrenador, **btn_cfg)
-        self.btn_entrenador.grid(row=4, column=3, padx=(4, 10), pady=4, sticky="ew")
+        tk.Button(self.root, text="⚙ Entrenador",
+                  bg="#585b70", fg=COLOR_FG,
+                  command=self._abrir_entrenador, **btn_cfg).grid(
+            row=6, column=3, padx=(4, 10), pady=4, sticky="ew")
 
-        # ── Mensaje de estado ────────────────────────────────────────────────
-        self.lbl_estado = tk.Label(
-            self.root, text="", bg=COLOR_BG, fg=COLOR_WARN,
-            font=("Segoe UI", 10), wraplength=620)
-        self.lbl_estado.grid(row=5, column=0, columnspan=4,
-                              padx=10, pady=(2, 10))
+        # ── Estado ───────────────────────────────────────────────────────────
+        self.lbl_estado = tk.Label(self.root, text="",
+                                   bg=COLOR_BG, fg=COLOR_WARN,
+                                   font=("Segoe UI", 9), wraplength=620)
+        self.lbl_estado.grid(row=7, column=0, columnspan=4,
+                             padx=10, pady=(0, 8))
 
-        # Pesos de columnas para que los botones se distribuyan igual
         for c in range(4):
             self.root.columnconfigure(c, weight=1)
 
-    # ─────────────────────────────────────────────────── Cámara y detección --
+    # ── Cámara ────────────────────────────────────────────────────────────────
 
     def _abrir_camara(self):
         self.cap = None
@@ -152,15 +184,12 @@ class AppWindow:
                     self.cap = cap
                     self.lbl_camara.configure(text="")
                     self.lbl_estado.configure(
-                        text=f"Cámara activa en dispositivo {idx}.", fg=COLOR_OK)
+                        text=f"Cámara activa.", fg=COLOR_OK)
                     return
                 cap.release()
-
-        self.lbl_camara.configure(text="No se pudo abrir la cámara", fg="#f38ba8")
-        messagebox.showerror(
-            "Sin cámara",
-            "Error: No se detectó ninguna cámara.\n"
-            "Conecte una cámara web e intente de nuevo.")
+        messagebox.showerror("Sin cámara",
+                             "No se detectó ninguna cámara.\n"
+                             "Conecte una cámara web e intente de nuevo.")
 
     def _loop_camara(self):
         if self.cap and self.cap.isOpened():
@@ -170,41 +199,30 @@ class AppWindow:
                 landmarks_norm, landmarks_raw = self.detector.process(frame)
                 self.detector.draw(frame, landmarks_raw)
                 self._procesar_prediccion(landmarks_norm)
-
-                img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                img = Image.fromarray(img).resize((CAM_W, CAM_H))
+                img = Image.fromarray(
+                    cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)).resize((CAM_W, CAM_H))
                 self._photo = ImageTk.PhotoImage(img)
-                self.lbl_camara.configure(image=self._photo)
-                self.lbl_camara.configure(text="")
-            else:
-                self.lbl_camara.configure(
-                    text="La cámara está abierta, pero no entrega frames.",
-                    fg=COLOR_WARN)
-        else:
-            self.lbl_camara.configure(text="Esperando cámara...", fg=COLOR_WARN)
-
+                self.lbl_camara.configure(image=self._photo, text="")
         self.root.after(30, self._loop_camara)
+
+    # ── Detección ─────────────────────────────────────────────────────────────
 
     def _procesar_prediccion(self, landmarks_norm):
         if not self.classifier.listo:
             return
 
         if landmarks_norm is None:
-            # Sin mano en frame
             self.classifier.limpiar_buffer()
             self.lbl_letra.configure(text="—", fg=COLOR_ACENTO)
             self.lbl_confianza.configure(text="")
             self.lbl_estado.configure(
                 text="Coloque su mano frente a la cámara", fg=COLOR_WARN)
-            self._manejar_espacio_automatico(mano_presente=False)
+            self._manejar_pausa(mano=False)
             return
 
-        self._t_sin_mano = None
-        self._espacio_puesto = False
-
+        self._manejar_pausa(mano=True)
         confirmada, instantanea, confianza = self.classifier.predecir(landmarks_norm)
 
-        # Actualizar UI con predicción instantánea
         if instantanea:
             self.lbl_letra.configure(text=instantanea, fg=COLOR_ACENTO)
             self.lbl_confianza.configure(
@@ -214,18 +232,29 @@ class AppWindow:
         else:
             self.lbl_letra.configure(text="?", fg="#585b70")
             self.lbl_confianza.configure(
-                text="Seña no reconocida con certeza. Intente de nuevo.",
-                fg=COLOR_WARN)
-            self.lbl_estado.configure(text="", fg=COLOR_FG)
+                text="Seña no reconocida. Intente de nuevo.", fg=COLOR_WARN)
 
-        # Agregar a pizarra solo si la letra está confirmada por el buffer
         if confirmada:
-            self._intentar_agregar(confirmada)
+            self._agregar_letra(confirmada)
 
-    def _manejar_espacio_automatico(self, mano_presente):
-        if mano_presente:
+    # ── Lógica de palabras y frases ───────────────────────────────────────────
+
+    def _agregar_letra(self, letra):
+        ahora = time.time()
+        if (letra == self._ultima_letra and
+                ahora - self._t_ultima_add < COOLDOWN_SEG):
+            return
+        self.palabra_actual += letra
+        self._ultima_letra   = letra
+        self._t_ultima_add   = ahora
+        self._palabra_leida  = False
+        self._frase_leida    = False
+        self.lbl_palabra.configure(text=self.palabra_actual)
+        self.lbl_voz.configure(text="🖐 Señando...", fg=COLOR_OK)
+
+    def _manejar_pausa(self, mano):
+        if mano:
             self._t_sin_mano = None
-            self.lbl_voz.configure(text="🖐 Señando...", fg=COLOR_OK)
             return
 
         ahora = time.time()
@@ -235,91 +264,91 @@ class AppWindow:
 
         espera = ahora - self._t_sin_mano
 
-        # Cuenta regresiva visual para el profesor
-        if espera < ESPACIO_SEG:
-            restante = ESPACIO_SEG - espera
-            self.lbl_voz.configure(
-                text=f"⏳ Leyendo en {restante:.1f}s...", fg=COLOR_WARN)
+        # Cuenta regresiva visual
+        if espera < PAUSA_PALABRA:
+            restante = PAUSA_PALABRA - espera
+            if self.palabra_actual:
+                self.lbl_voz.configure(
+                    text=f"⏳ Leyendo en {restante:.1f}s...", fg=COLOR_WARN)
             return
 
-        if not self._espacio_puesto:
-            # Leer la última palabra automáticamente
-            palabras = self.pizarra.strip().split()
-            if palabras:
-                ultima = palabras[-1]
-                if ultima != self._ultima_palabra_leida:
-                    self._ultima_palabra_leida = ultima
-                    self.tts.speak_phrase(ultima)
-                    self.lbl_voz.configure(
-                        text=f"🔊 Leyendo: {ultima}", fg=COLOR_ACENTO)
+        # ── Pausa corta: confirmar palabra ───────────────────────────────────
+        if not self._palabra_leida and self.palabra_actual:
+            palabra = self.palabra_actual.strip()
+            self.frase_actual = (self.frase_actual + " " + palabra).strip()
+            self.lbl_frase.configure(text=self.frase_actual)
+            self.tts.speak_phrase(palabra)
+            self.lbl_voz.configure(text=f"🔊 {palabra}", fg=COLOR_ACENTO)
+            self.palabra_actual = ""
+            self.lbl_palabra.configure(text="")
+            self._palabra_leida = True
 
-            if self.pizarra and not self.pizarra.endswith(" "):
-                self.pizarra += " "
-                self._espacio_puesto = True
-                self._actualizar_pizarra()
+        # ── Pausa larga: confirmar frase completa ────────────────────────────
+        if espera >= PAUSA_FRASE and not self._frase_leida and self.frase_actual:
+            self._guardar_en_historial(self.frase_actual)
+            self.frase_actual  = ""
+            self.lbl_frase.configure(text="")
+            self._frase_leida  = True
+            self.lbl_voz.configure(text="🎤 Esperando...", fg="#585b70")
 
-    def _intentar_agregar(self, letra):
-        ahora = time.time()
-        mismo_cooldown = (
-            letra == self._ultima_letra and
-            (ahora - self._t_ultima_add) < COOLDOWN_SEG
-        )
-        if mismo_cooldown:
-            return
+    def _guardar_en_historial(self, frase):
+        self.historial.append(frase)
+        self.txt_historial.configure(state="normal")
+        self.txt_historial.insert("end", f"• {frase}\n")
+        self.txt_historial.see("end")
+        self.txt_historial.configure(state="disabled")
 
-        self.pizarra += letra
-        self._ultima_letra = letra
-        self._t_ultima_add = ahora
-        self._actualizar_pizarra()
-        # No leer letra por letra — el profesor escucha la palabra completa al pausar
+    # ── Botones ───────────────────────────────────────────────────────────────
 
-    # ──────────────────────────────────────────────────────── Pizarra ──────
-
-    def _actualizar_pizarra(self):
-        texto = self.pizarra if self.pizarra else ""
-        self.lbl_pizarra.configure(text=texto)
-
-    def _leer_frase(self):
-        if self.pizarra.strip():
-            self.tts.speak_phrase(self.pizarra.strip())
+    def _leer_frase_manual(self):
+        texto = (self.frase_actual + " " + self.palabra_actual).strip()
+        if texto:
+            self.tts.speak_phrase(texto)
+            self.lbl_voz.configure(text=f"🔊 {texto}", fg=COLOR_ACENTO)
         else:
-            self.lbl_estado.configure(
-                text="La pizarra está vacía.", fg=COLOR_WARN)
+            self.lbl_estado.configure(text="No hay texto para leer.", fg=COLOR_WARN)
 
-    def _borrar_ultimo(self):
-        if self.pizarra:
-            self.pizarra = self.pizarra[:-1]
-            self._actualizar_pizarra()
+    def _borrar_letra(self):
+        if self.palabra_actual:
+            self.palabra_actual = self.palabra_actual[:-1]
+            self.lbl_palabra.configure(text=self.palabra_actual)
+        elif self.frase_actual:
+            palabras = self.frase_actual.split()
+            if palabras:
+                self.palabra_actual = palabras[-1]
+                self.frase_actual   = " ".join(palabras[:-1])
+                self.lbl_palabra.configure(text=self.palabra_actual)
+                self.lbl_frase.configure(text=self.frase_actual)
 
-    def _limpiar_pizarra(self):
-        self.pizarra = ""
-        self._ultima_letra = None
-        self._actualizar_pizarra()
+    def _limpiar_todo(self):
+        self.palabra_actual = ""
+        self.frase_actual   = ""
+        self._ultima_letra  = None
+        self.lbl_palabra.configure(text="")
+        self.lbl_frase.configure(text="")
+        self.lbl_letra.configure(text="—")
+        self.lbl_voz.configure(text="🎤 Esperando...", fg="#585b70")
 
-    # ──────────────────────────────────────────────────── Modo Entrenador ──
+    # ── Entrenador ────────────────────────────────────────────────────────────
 
     def _abrir_entrenador(self):
         from gui.trainer import TrainerWindow
         ventana = tk.Toplevel(self.root)
         app = TrainerWindow(ventana)
         ventana.protocol("WM_DELETE_WINDOW", app.cerrar)
-        # Al cerrar el entrenador, recargar el modelo por si fue reentrenado
         ventana.bind("<Destroy>", lambda e: self.classifier.recargar())
 
-    # ──────────────────────────────────────────────────── Verificaciones ──
+    # ── Verificaciones ────────────────────────────────────────────────────────
 
     def _verificar_modelo(self):
         if not self.classifier.listo:
-            if self.classifier.error == MODEL_NOT_FOUND:
-                self.lbl_estado.configure(
-                    text="Modelo no encontrado. Use el Modo Entrenador "
-                         "para crear su dataset y entrenar el sistema.",
-                    fg=COLOR_WARN)
-            else:
-                self.lbl_estado.configure(
-                    text=self.classifier.error, fg="#f38ba8")
+            msg = ("Modelo no encontrado. Use ⚙ Entrenador para capturar "
+                   "señas y entrenar el sistema."
+                   if self.classifier.error == MODEL_NOT_FOUND
+                   else self.classifier.error)
+            self.lbl_estado.configure(text=msg, fg=COLOR_WARN)
 
-    # ──────────────────────────────────────────────────────────── Cierre ──
+    # ── Cierre ────────────────────────────────────────────────────────────────
 
     def cerrar(self):
         if self.cap:
