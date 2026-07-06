@@ -1,0 +1,31 @@
+# Dataset y modelo entrenado (se generan localmente)
+data/dataset.csv
+models/lsc_model.pkl
+
+# MediaPipe model (se descarga automáticamente)
+models/hand_landmarker.task
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# Entornos virtuales
+venv/
+env/
+.venv/
+
+# VS Code
+.vscode/
+
+# Windows
+Thumbs.db
+Desktop.ini
