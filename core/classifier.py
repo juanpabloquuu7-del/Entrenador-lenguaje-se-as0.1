@@ -12,9 +12,10 @@ MODEL_PATH = os.path.join(BASE_DIR, "models", "lsc_model.pkl")
 
 MODEL_NOT_FOUND = "MODEL_NOT_FOUND"
 
-BUFFER_SIZE    = 15   # últimas N predicciones
-MIN_VOTES      = 10   # mínimo de votos para confirmar una letra (66%)
-MIN_CONFIDENCE = 0.60 # confianza mínima del modelo para considerar la predicción
+BUFFER_SIZE    = 20   # últimas N predicciones
+MIN_VOTES      = 12   # mínimo de votos para confirmar (60%)
+MIN_CONFIDENCE = 0.65 # confianza mínima por frame
+PESO_RECIENTE  = 2    # los últimos 5 frames valen el doble
 
 
 class Classifier:
@@ -67,14 +68,21 @@ class Classifier:
         letra_instantanea = self._modelo.classes_[idx_max]
 
         if confianza < MIN_CONFIDENCE:
-            self._buffer.append(None)
+            self._buffer.append((None, 0.0))
             return None, None, confianza
 
-        self._buffer.append(letra_instantanea)
+        self._buffer.append((letra_instantanea, confianza))
 
-        # Contar votos en el buffer
-        votos = sum(1 for v in self._buffer if v == letra_instantanea)
-        letra_confirmada = letra_instantanea if votos >= MIN_VOTES else None
+        # Votos ponderados: frames recientes valen el doble
+        votos = 0
+        n = len(self._buffer)
+        for i, (letra, _) in enumerate(self._buffer):
+            if letra == letra_instantanea:
+                peso = PESO_RECIENTE if i >= n - 5 else 1
+                votos += peso
+
+        umbral = MIN_VOTES * (1 + (1 - confianza))  # umbral adaptativo
+        letra_confirmada = letra_instantanea if votos >= umbral else None
 
         return letra_confirmada, letra_instantanea, confianza
 

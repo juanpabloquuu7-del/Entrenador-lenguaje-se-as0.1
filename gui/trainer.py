@@ -23,7 +23,7 @@ sys.path.insert(0, BASE_DIR)
 from core.hand_detector import HandDetector
 
 
-COLUMNAS = ["letra"] + [f"{eje}{i}" for i in range(1, 21) for eje in ("x", "y")]
+COLUMNAS = ["letra"] + [f"{eje}{i}" for i in range(1, 21) for eje in ("x", "y", "z")]
 
 CAPTURE_COUNTDOWN = 3   # segundos de cuenta regresiva
 CAPTURE_DURATION  = 5   # segundos de captura activa

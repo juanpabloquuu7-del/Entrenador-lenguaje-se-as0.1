@@ -73,13 +73,25 @@ class HandDetector:
 
     def _normalize(self, landmarks):
         """
-        Normaliza los 21 landmarks restando la muñeca (landmark 0).
-        Resultado: vector de 60 floats (landmarks 1..20, solo x e y).
+        Normaliza los 21 landmarks restando la muñeca (landmark 0)
+        y escala por la distancia muñeca-dedo medio para ser invariante
+        al tamaño de la mano en pantalla.
+        Resultado: vector de 60 floats (x, y de landmarks 1..20).
         """
-        ox, oy = landmarks[0].x, landmarks[0].y
+        ox, oy, oz = landmarks[0].x, landmarks[0].y, landmarks[0].z
+
+        # Escala: distancia entre muñeca (0) y base del dedo medio (9)
+        dx = landmarks[9].x - ox
+        dy = landmarks[9].y - oy
+        escala = max((dx**2 + dy**2) ** 0.5, 1e-6)
+
         vector = []
         for lm in landmarks[1:]:
-            vector.extend([lm.x - ox, lm.y - oy])
+            vector.extend([
+                (lm.x - ox) / escala,
+                (lm.y - oy) / escala,
+                (lm.z - oz) / escala,   # profundidad normalizada
+            ])
         return vector
 
     def close(self):
