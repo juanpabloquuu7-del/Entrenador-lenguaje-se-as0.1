@@ -4,6 +4,10 @@ models/lsc_model.pkl
 
 # MediaPipe model (se descarga automáticamente)
 models/hand_landmarker.task
+models/letras/
+models/*.png
+models/*.jpg
+models/*.webp
 
 # PyInstaller
 build/
